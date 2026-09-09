@@ -555,12 +555,13 @@ async function conectar() {
 
       // ─── CANCELAR CONEXÃO EM ANDAMENTO ───────────────
       if (texto === `${prefix}cancelar`) {
-        if (subbotManager.connectingStates.has(remetente)) {
-          const estado = subbotManager.connectingStates.get(remetente);
+        const userKey = isGroup ? senderJid : remetente;
+        if (!isFromMe && subbotManager.connectingStates.has(userKey)) {
+          const estado = subbotManager.connectingStates.get(userKey);
           if (estado.id) await subbotManager.deletarSubbot(estado.id);
-          subbotManager.limparEstado(remetente);
+          subbotManager.limparEstado(userKey);
           await sock.readMessages([msg.key]).catch(() => {});
-          await sock.sendMessage(remetente, { text: '❌ *Processo de conexão cancelado.*' }, { quoted: msg });
+          await sock.sendMessage(remetente, { text: '❌ *Processo de conexão cancelado com sucesso.*' }, { quoted: msg });
           continue;
         }
       }
@@ -568,7 +569,8 @@ async function conectar() {
       // ─── DESCONECTAR PRÓPRIO SUB-BOT ──────────────────
       if (texto === `${prefix}desconectar` || texto === `${prefix}desconectarsub`) {
         await sock.readMessages([msg.key]).catch(() => {});
-        const meuSub = subbotManager.getSubbotPorUsuario(remetente);
+        const userKey = isGroup ? senderJid : remetente;
+        const meuSub = subbotManager.getSubbotPorUsuario(userKey);
         if (!meuSub) {
           await sock.sendMessage(remetente, { text: 'ℹ️ Você não possui nenhum sub-bot conectado no momento.' }, { quoted: msg });
           continue;
@@ -580,63 +582,69 @@ async function conectar() {
       }
 
       // ─── FLUXO CONVERSACIONAL DE CONEXÃO ──────────────
-      // Apenas mensagens privadas e NUNCA mensagens do próprio bot (fromMe)
-      const estadoConexao = (!isGroup && !isFromMe) ? subbotManager.connectingStates.get(remetente) : null;
+      // Identifica o estado pelo usuário específico (nunca para mensagens enviadas pelo próprio bot)
+      const userKey = isGroup ? senderJid : remetente;
+      const estadoConexao = !isFromMe ? subbotManager.connectingStates.get(userKey) : null;
 
       if (estadoConexao) {
-        await sock.readMessages([msg.key]).catch(() => {});
+        const targetChat = estadoConexao.chatJid || remetente;
 
         // ETAPA 1: Escolha do método (1 = QR Code, 2 = Pairing Code)
         if (estadoConexao.step === 'ESCOLHER_METODO') {
           if (texto === '1') {
+            await sock.readMessages([msg.key]).catch(() => {});
             // QR CODE
             estadoConexao.step = 'PROCESSANDO_QR';
             estadoConexao.method = '1';
             const subId = subbotManager.gerarProximoId();
             estadoConexao.id = subId;
 
-            await sock.sendMessage(remetente, {
+            await sock.sendMessage(targetChat, {
               text: '⏳ *Gerando QR Code...*\nPor favor, aguarde alguns instantes.'
             }, { quoted: msg });
 
             subbotManager.iniciarConexao({
               id: subId,
-              userJid: remetente,
+              userJid: userKey,
               method: '1',
               onQRCode: async (buffer) => {
-                await sock.sendMessage(remetente, {
+                await sock.sendMessage(targetChat, {
                   image: buffer,
                   caption: '📲 *Aponte seu WhatsApp para conectar!*\n\n• Abra o WhatsApp > Aparelhos Conectados > Conectar um aparelho.\n⏱️ Você tem 1 minuto para escanear.'
-                });
+                }, { quoted: msg });
               },
               onConnected: async (phoneConectado) => {
-                subbotManager.limparEstado(remetente);
-                await sock.sendMessage(remetente, {
+                subbotManager.limparEstado(userKey);
+                await sock.sendMessage(targetChat, {
                   text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar, envie *${prefix}desconectar*.`
-                });
+                }, { quoted: msg });
               },
               onError: async (errMsg) => {
-                subbotManager.limparEstado(remetente);
+                subbotManager.limparEstado(userKey);
                 await subbotManager.deletarSubbot(subId);
-                await sock.sendMessage(remetente, {
+                await sock.sendMessage(targetChat, {
                   text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *${prefix}conectar* para tentar novamente.`
-                });
+                }, { quoted: msg });
               }
             });
             continue;
           } else if (texto === '2') {
+            await sock.readMessages([msg.key]).catch(() => {});
             // PAIRING CODE
             estadoConexao.step = 'AGUARDANDO_NUMERO';
             estadoConexao.method = '2';
 
-            await sock.sendMessage(remetente, {
+            await sock.sendMessage(targetChat, {
               text: '📱 *Envie seu número de telefone com DDI e DDD:*\n\nExemplo: `5511999999999` ou `258879116693`\n*(Digite apenas números ou com +)*'
             }, { quoted: msg });
             continue;
           } else {
-            await sock.sendMessage(remetente, {
-              text: `⚠️ *Opção inválida!*\n\nPor favor, responda apenas:\n*1* - Para QR Code\n*2* - Para Código de Pareamento\n\n_(Envie *${prefix}cancelar* para desistir)_`
-            }, { quoted: msg });
+            // Em grupos, se for mensagem normal de conversa, não enviar erro para não poluir o grupo.
+            if (!isGroup || texto.length <= 3) {
+              await sock.sendMessage(targetChat, {
+                text: `⚠️ *Opção inválida!*\n\nPor favor, responda apenas:\n*1* - Para QR Code\n*2* - Para Código de Pareamento\n\n_(Envie *${prefix}cancelar* para desistir)_`
+              }, { quoted: msg });
+            }
             continue;
           }
         }
@@ -646,64 +654,60 @@ async function conectar() {
           const cleanPhone = rawTexto.replace(/[^0-9]/g, '');
 
           if (cleanPhone.length < 8 || cleanPhone.length > 16) {
-            await sock.sendMessage(remetente, {
-              text: `⚠️ *Número inválido!*\nCertifique-se de incluir o DDI e DDD (ex: \`5511999999999\`). Tente novamente ou envie *${prefix}cancelar*.`
-            }, { quoted: msg });
+            if (!isGroup || cleanPhone.length > 0) {
+              await sock.sendMessage(targetChat, {
+                text: `⚠️ *Número inválido!*\nCertifique-se de incluir o DDI e DDD (ex: \`5511999999999\` ou \`258855954127\`). Tente novamente ou envie *${prefix}cancelar*.`
+              }, { quoted: msg });
+            }
             continue;
           }
 
+          await sock.readMessages([msg.key]).catch(() => {});
           estadoConexao.step = 'PROCESSANDO_CODE';
           estadoConexao.phone = cleanPhone;
           const subId = subbotManager.gerarProximoId();
           estadoConexao.id = subId;
 
-          await sock.sendMessage(remetente, {
+          await sock.sendMessage(targetChat, {
             text: `⏳ *Solicitando código de pareamento para o número +${cleanPhone}...*\nAguarde alguns segundos.`
           }, { quoted: msg });
 
           subbotManager.iniciarConexao({
             id: subId,
-            userJid: remetente,
+            userJid: userKey,
             method: '2',
             phone: cleanPhone,
             onPairingCode: async (code) => {
               const codeFormatado = code?.match(/.{1,4}/g)?.join('-') || code;
-              await sock.sendMessage(remetente, {
+              await sock.sendMessage(targetChat, {
                 text: `📲 *SEU CÓDIGO DE PAREAMENTO:*\n\n#️⃣ \`${codeFormatado}\`\n\n*Como conectar:* \n1. Abra o WhatsApp no celular.\n2. Toque em ⋮ > *Aparelhos conectados*.\n3. Toque em *Conectar um aparelho* > *Conectar com número de telefone*.\n4. Insira o código acima.\n\n⏱️ Aguardando confirmação...`
-              });
+              }, { quoted: msg });
             },
             onConnected: async (phoneConectado) => {
-              subbotManager.limparEstado(remetente);
-              await sock.sendMessage(remetente, {
+              subbotManager.limparEstado(userKey);
+              await sock.sendMessage(targetChat, {
                 text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar futuramente, envie *${prefix}desconectar*.`
-              });
+              }, { quoted: msg });
             },
             onError: async (errMsg) => {
-              subbotManager.limparEstado(remetente);
+              subbotManager.limparEstado(userKey);
               await subbotManager.deletarSubbot(subId);
-              await sock.sendMessage(remetente, {
+              await sock.sendMessage(targetChat, {
                 text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *${prefix}conectar* para tentar novamente.`
-              });
+              }, { quoted: msg });
             }
           });
           continue;
         }
       }
 
-      // ─── COMANDO CONECTAR ────────────────────────────
+      // ─── COMANDO CONECTAR (Grupos e PV) ──────────────
       if (texto === `${prefix}conectar`) {
         await sock.readMessages([msg.key]).catch(() => {});
-
-        // Sub-bot só pode ser configurado em privado por privacidade e segurança
-        if (isGroup) {
-          await sock.sendMessage(remetente, {
-            text: `⚠️ *Atenção:* Por motivos de privacidade e segurança (envio de QR Code e Código de Pareamento), envie *${prefix}conectar* diretamente no meu chat privado.`
-          }, { quoted: msg });
-          continue;
-        }
+        const userKey = isGroup ? senderJid : remetente;
 
         // 1. Verificar se o usuário já tem um subbot ativo
-        const subExistente = subbotManager.getSubbotPorUsuario(remetente);
+        const subExistente = subbotManager.getSubbotPorUsuario(userKey);
         if (subExistente) {
           await sock.sendMessage(remetente, {
             text: `⚠️ *Você já possui um sub-bot ativo!*\n\n• ID: \`${subExistente.id}\`\n• Número: \`${subExistente.phone}\`\n\nPara desconectar seu bot anterior e criar um novo, envie *${prefix}desconectar*.`
@@ -723,18 +727,20 @@ async function conectar() {
 
         // 3. Iniciar fluxo de escolha de método
         const timeoutHandle = setTimeout(async () => {
-          if (subbotManager.connectingStates.has(remetente)) {
-            const estado = subbotManager.connectingStates.get(remetente);
+          if (subbotManager.connectingStates.has(userKey)) {
+            const estado = subbotManager.connectingStates.get(userKey);
             if (estado.id) await subbotManager.deletarSubbot(estado.id);
-            subbotManager.limparEstado(remetente);
+            subbotManager.limparEstado(userKey);
             await sock.sendMessage(remetente, {
               text: '⏱️ *Tempo esgotado:* Processo de conexão cancelado por inatividade.'
-            }).catch(() => {});
+            }, { quoted: msg }).catch(() => {});
           }
         }, 120000); // 2 minutos de timeout
 
-        subbotManager.connectingStates.set(remetente, {
+        subbotManager.connectingStates.set(userKey, {
           step: 'ESCOLHER_METODO',
+          chatJid: remetente,
+          userJid: userKey,
           timeoutHandle
         });
 
@@ -742,15 +748,15 @@ async function conectar() {
         const limite = subbotManager.getLimiteMaximo();
 
         const menuEscolha = [
-          '🤖 *SISTEMA DE SUB-BOTS*',
+          '⚡ *SISTEMA DE SUB-BOTS*',
           '',
           `📊 *Vagas disponíveis:* ${limite - ativos} de ${limite}`,
           '',
           'Escolha como deseja conectar:',
-          '*[1]* QR Code',
-          '*[2]* Código de Pareamento',
+          '*[1]* 📷 QR Code',
+          '*[2]* 🔢 Código de Pareamento',
           '',
-          '👉 *Responda apenas com 1 ou 2.*',
+          '👉 *Responda apenas com "1" ou "2".*',
           `_(Envie *${prefix}cancelar* a qualquer momento para desistir)_`
         ].join('\n');
 
