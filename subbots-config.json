@@ -1,4 +1,5 @@
 {
   "limiteMaximo": 2,
-  "subbots": {}
+  "subbots": {},
+  "prefixo": "!"
 }

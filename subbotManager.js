@@ -31,6 +31,7 @@ class SubbotManager {
       if (fs.existsSync(CONFIG_FILE)) {
         const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf-8'));
         this.config = {
+          prefixo: data.prefixo ?? '!',
           limiteMaximo: data.limiteMaximo ?? 2,
           subbots: data.subbots ?? {}
         };
@@ -39,7 +40,7 @@ class SubbotManager {
       }
     } catch (e) {
       console.error('❌ Erro ao carregar subbots-config.json:', e.message);
-      this.config = { limiteMaximo: 2, subbots: {} };
+      this.config = { prefixo: '!', limiteMaximo: 2, subbots: {} };
     }
   }
 
@@ -49,6 +50,15 @@ class SubbotManager {
     } catch (e) {
       console.error('❌ Erro ao salvar subbots-config.json:', e.message);
     }
+  }
+
+  getPrefixo() {
+    return this.config.prefixo || '!';
+  }
+
+  setPrefixo(novoPrefixo) {
+    this.config.prefixo = novoPrefixo;
+    this.salvarConfig();
   }
 
   getLimiteMaximo() {

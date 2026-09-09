@@ -354,9 +354,30 @@ async function conectar() {
 
       if (!texto) continue;
 
+      const prefix = subbotManager.getPrefixo();
+
       // ─── COMANDOS DE DONO ─────────────────────────────
       if (isDono) {
-        if (texto === '.on') {
+        // Trocar prefixo dinamicamente (!setprefixo . ou !setprefixo !)
+        if (texto.startsWith(`${prefix}setprefixo`) || texto.startsWith('.setprefixo') || texto.startsWith('!setprefixo')) {
+          await sock.readMessages([msg.key]).catch(() => {});
+          const partes = rawTexto.split(/\s+/);
+          const novoPref = partes[1]?.trim();
+          if (!novoPref || novoPref.length > 3) {
+            await sock.sendMessage(remetente, {
+              text: `⚠️ *Uso correto:* \`${prefix}setprefixo <novo_prefixo>\`\nExemplo: \`${prefix}setprefixo !\` ou \`${prefix}setprefixo .\``
+            }, { quoted: msg });
+            continue;
+          }
+
+          subbotManager.setPrefixo(novoPref);
+          await sock.sendMessage(remetente, {
+            text: `✅ *Prefixo atualizado com sucesso!*\n\n• Novo prefixo ativo: *${novoPref}*\nExemplo de comando: *${novoPref}bot* ou *${novoPref}conectar*`
+          }, { quoted: msg });
+          continue;
+        }
+
+        if (texto === `${prefix}on`) {
           await sock.readMessages([msg.key]).catch(() => {});
           modoAtivo = true;
           salvarEstado();
@@ -365,7 +386,7 @@ async function conectar() {
           continue;
         }
 
-        if (texto === '.off') {
+        if (texto === `${prefix}off`) {
           await sock.readMessages([msg.key]).catch(() => {});
           modoAtivo = false;
           salvarEstado();
@@ -374,7 +395,7 @@ async function conectar() {
           continue;
         }
 
-        if (texto === '.bot') {
+        if (texto === `${prefix}bot`) {
           await sock.readMessages([msg.key]).catch(() => {});
           const uptime = formatUptime(Date.now() - startTime);
           const mem = process.memoryUsage();
@@ -386,6 +407,7 @@ async function conectar() {
             '',
             `⏱️ *Uptime:* ${uptime}`,
             `📡 *Modo:* ${modoAtivo ? '🟢 ON (24/7)' : '🔴 OFF (Normal)'}`,
+            `⚡ *Prefixo:* \`${prefix}\``,
             `🔗 *Conexão:* ✅ Conectado`,
             `💾 *RAM:* ${rss} MB (heap: ${heap} MB)`,
             `👥 *Sub-Bots:* ${subbotManager.getAtivosCount()}/${subbotManager.getLimiteMaximo()} ativos`,
@@ -398,20 +420,20 @@ async function conectar() {
         }
 
         // Listar sub-bots conectados
-        if (texto === '.subbots' || texto === '.listarsub') {
+        if (texto === `${prefix}subbots` || texto === `${prefix}listarsub`) {
           await sock.readMessages([msg.key]).catch(() => {});
           const lista = subbotManager.listarSubbots();
           await sock.sendMessage(remetente, { text: lista }, { quoted: msg });
           continue;
         }
 
-        // Alterar limite de sub-bots (.setlimite 5)
-        if (texto.startsWith('.setlimite')) {
+        // Alterar limite de sub-bots (!setlimite 5)
+        if (texto.startsWith(`${prefix}setlimite`)) {
           await sock.readMessages([msg.key]).catch(() => {});
           const partes = rawTexto.split(/\s+/);
           const novoLimite = parseInt(partes[1], 10);
           if (isNaN(novoLimite) || novoLimite < 0) {
-            await sock.sendMessage(remetente, { text: '⚠️ *Uso correto:* `.setlimite <número>`\nExemplo: `.setlimite 3`' }, { quoted: msg });
+            await sock.sendMessage(remetente, { text: `⚠️ *Uso correto:* \`${prefix}setlimite <número>\`\nExemplo: \`${prefix}setlimite 3\`` }, { quoted: msg });
             continue;
           }
 
@@ -422,13 +444,13 @@ async function conectar() {
           continue;
         }
 
-        // Deletar / Desconectar subbot por ID (.delsubbot 1)
-        if (texto.startsWith('.delsubbot')) {
+        // Deletar / Desconectar subbot por ID (!delsubbot 1)
+        if (texto.startsWith(`${prefix}delsubbot`)) {
           await sock.readMessages([msg.key]).catch(() => {});
           const partes = rawTexto.split(/\s+/);
           const idSub = partes[1];
           if (!idSub) {
-            await sock.sendMessage(remetente, { text: '⚠️ *Uso correto:* `.delsubbot <id>`\nConsulte os IDs com `.subbots`.' }, { quoted: msg });
+            await sock.sendMessage(remetente, { text: `⚠️ *Uso correto:* \`${prefix}delsubbot <id>\`\nConsulte os IDs com \`${prefix}subbots\`.` }, { quoted: msg });
             continue;
           }
 
@@ -443,7 +465,7 @@ async function conectar() {
       }
 
       // ─── CANCELAR CONEXÃO EM ANDAMENTO ───────────────
-      if (texto === '.cancelar') {
+      if (texto === `${prefix}cancelar` || texto === '.cancelar') {
         if (subbotManager.connectingStates.has(remetente)) {
           const estado = subbotManager.connectingStates.get(remetente);
           if (estado.id) await subbotManager.deletarSubbot(estado.id);
@@ -455,7 +477,7 @@ async function conectar() {
       }
 
       // ─── DESCONECTAR PRÓPRIO SUB-BOT ──────────────────
-      if (texto === '.desconectar' || texto === '.desconectarsub') {
+      if (texto === `${prefix}desconectar` || texto === `${prefix}desconectarsub` || texto === '.desconectar') {
         await sock.readMessages([msg.key]).catch(() => {});
         const meuSub = subbotManager.getSubbotPorUsuario(remetente);
         if (!meuSub) {
@@ -578,15 +600,15 @@ async function conectar() {
         }
       }
 
-      // ─── COMANDO .CONECTAR ────────────────────────────
-      if (texto === '.conectar') {
+      // ─── COMANDO CONECTAR ────────────────────────────
+      if (texto === `${prefix}conectar` || texto === '.conectar') {
         await sock.readMessages([msg.key]).catch(() => {});
 
         // 1. Verificar se o usuário já tem um subbot ativo
         const subExistente = subbotManager.getSubbotPorUsuario(remetente);
         if (subExistente) {
           await sock.sendMessage(remetente, {
-            text: `⚠️ *Você já possui um sub-bot ativo!*\n\n• ID: \`${subExistente.id}\`\n• Número: \`${subExistente.phone}\`\n\nPara desconectar seu bot anterior e criar um novo, envie *.desconectar*.`
+            text: `⚠️ *Você já possui um sub-bot ativo!*\n\n• ID: \`${subExistente.id}\`\n• Número: \`${subExistente.phone}\`\n\nPara desconectar seu bot anterior e criar um novo, envie *${prefix}desconectar*.`
           }, { quoted: msg });
           continue;
         }
@@ -631,7 +653,7 @@ async function conectar() {
           '*[2]* Código de Pareamento',
           '',
           '👉 *Responda apenas com 1 ou 2.*',
-          '_(Envie *.cancelar* a qualquer momento para desistir)_'
+          `_(Envie *${prefix}cancelar* a qualquer momento para desistir)_`
         ].join('\n');
 
         await sock.sendMessage(remetente, { text: menuEscolha }, { quoted: msg });
