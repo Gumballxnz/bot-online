@@ -356,23 +356,64 @@ async function conectar() {
 
       const prefix = subbotManager.getPrefixo();
 
+      // ─── COMANDO !MENU (Público para todos os membros) ─
+      if (texto === `${prefix}menu`) {
+        await sock.readMessages([msg.key]).catch(() => {});
+        const senderPushName = msg.pushName || (isFromMe ? 'Dono' : 'Membro');
+        const vagasLivres = subbotManager.getLimiteMaximo() - subbotManager.getAtivosCount();
+
+        let menuMsg = `╭┈⊰ ⚡ 『 *BOT ONLINE* 』\n`;
+        menuMsg += `┊Olá, ${senderPushName} ╰⁔╯!\n`;
+        menuMsg += `╰─┈┈┈┈┈◜❁◞┈┈┈┈┈─╯\n\n`;
+
+        menuMsg += `╭┈❁ *⚡ SUB-BOTS & CONEXÃO*\n`;
+        menuMsg += `┊\n`;
+        menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}conectar\n`;
+        menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}desconectar\n`;
+        menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}cancelar\n`;
+        menuMsg += `┊\n`;
+        menuMsg += `┊📊 Vagas disponíveis: ${vagasLivres}/${subbotManager.getLimiteMaximo()}\n`;
+        menuMsg += `╰─┈┈┈┈┈◜❁◞┈┈┈┈┈─╯\n\n`;
+
+        menuMsg += `╭┈❁ *ℹ️ INFORMAÇÕES*\n`;
+        menuMsg += `┊\n`;
+        menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}menu\n`;
+        menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}bot\n`;
+        menuMsg += `╰─┈┈┈┈┈◜❁◞┈┈┈┈┈─╯`;
+
+        if (isDono) {
+          menuMsg += `\n\n╭┈❁ *👑 PAINEL DO DONO*\n`;
+          menuMsg += `┊\n`;
+          menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}subbots\n`;
+          menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}setlimite <n>\n`;
+          menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}delsubbot <id>\n`;
+          menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}setprefixo <pref>\n`;
+          menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}on\n`;
+          menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}off\n`;
+          menuMsg += `╰─┈┈┈┈┈◜❁◞┈┈┈┈┈─╯`;
+        }
+
+        await sock.sendMessage(remetente, { text: menuMsg }, { quoted: msg });
+        continue;
+      }
+
       // ─── COMANDOS DE DONO ─────────────────────────────
       if (isDono) {
-        // Trocar prefixo dinamicamente (!setprefixo . ou !setprefixo !)
-        if (texto.startsWith(`${prefix}setprefixo`) || texto.startsWith('.setprefixo') || texto.startsWith('!setprefixo')) {
+        // Trocar prefixo dinamicamente (!setprefixo <novo>)
+        if (texto.startsWith(`${prefix}setprefixo`)) {
           await sock.readMessages([msg.key]).catch(() => {});
           const partes = rawTexto.split(/\s+/);
           const novoPref = partes[1]?.trim();
           if (!novoPref || novoPref.length > 3) {
             await sock.sendMessage(remetente, {
-              text: `⚠️ *Uso correto:* \`${prefix}setprefixo <novo_prefixo>\`\nExemplo: \`${prefix}setprefixo !\` ou \`${prefix}setprefixo .\``
+              text: `⚠️ *Uso correto:* \`${prefix}setprefixo <novo_prefixo>\`\nExemplo: \`${prefix}setprefixo !\` ou \`${prefix}setprefixo #\``
             }, { quoted: msg });
             continue;
           }
 
           subbotManager.setPrefixo(novoPref);
           await sock.sendMessage(remetente, {
-            text: `✅ *Prefixo atualizado com sucesso!*\n\n• Novo prefixo ativo: *${novoPref}*\nExemplo de comando: *${novoPref}bot* ou *${novoPref}conectar*`
+            text: `✅ *Prefixo atualizado com sucesso!*\n\n• Novo prefixo ativo: *${novoPref}*\nExemplo de comando: *${novoPref}menu* ou *${novoPref}conectar*`
           }, { quoted: msg });
           continue;
         }
@@ -465,7 +506,7 @@ async function conectar() {
       }
 
       // ─── CANCELAR CONEXÃO EM ANDAMENTO ───────────────
-      if (texto === `${prefix}cancelar` || texto === '.cancelar') {
+      if (texto === `${prefix}cancelar`) {
         if (subbotManager.connectingStates.has(remetente)) {
           const estado = subbotManager.connectingStates.get(remetente);
           if (estado.id) await subbotManager.deletarSubbot(estado.id);
@@ -477,7 +518,7 @@ async function conectar() {
       }
 
       // ─── DESCONECTAR PRÓPRIO SUB-BOT ──────────────────
-      if (texto === `${prefix}desconectar` || texto === `${prefix}desconectarsub` || texto === '.desconectar') {
+      if (texto === `${prefix}desconectar` || texto === `${prefix}desconectarsub`) {
         await sock.readMessages([msg.key]).catch(() => {});
         const meuSub = subbotManager.getSubbotPorUsuario(remetente);
         if (!meuSub) {
@@ -601,7 +642,7 @@ async function conectar() {
       }
 
       // ─── COMANDO CONECTAR ────────────────────────────
-      if (texto === `${prefix}conectar` || texto === '.conectar') {
+      if (texto === `${prefix}conectar`) {
         await sock.readMessages([msg.key]).catch(() => {});
 
         // 1. Verificar se o usuário já tem um subbot ativo
