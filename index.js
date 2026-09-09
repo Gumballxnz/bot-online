@@ -225,13 +225,18 @@ async function conectar() {
     browser: Browsers.ubuntu('Chrome'),
     auth: state,
     emitOwnEvents: true,
-    markOnlineOnConnect: true,
-    keepAliveIntervalMs: 20000,
-    connectTimeoutMs: 30000,
-    syncFullHistory: false,
+    fireInitQueries: false,
     generateHighQualityLinkPreview: false,
+    syncFullHistory: false,
+    markOnlineOnConnect: false,
+    connectTimeoutMs: 180000,
+    keepAliveIntervalMs: 30000,
+    defaultQueryTimeoutMs: 60000,
     getMessage: async () => undefined,
   });
+
+  // Salvar credenciais ANTES do pairing
+  sock.ev.on('creds.update', saveCreds);
 
   // ─── PAIRING CODE (apenas se --pair for passado) ───
   if (!state.creds.registered && wantsPairing) {
@@ -254,18 +259,16 @@ async function conectar() {
       } catch (err) {
         console.error(`[PAIRING] Erro (Tentativa ${attempt}/5):`, err.message);
         if (attempt < 5) {
-          console.log('[PAIRING] Aguardando 3s antes de tentar novamente...');
-          pairingTimeoutHandle = setTimeout(() => requestPairing(attempt + 1), 3000);
+          console.log('[PAIRING] Aguardando 5s antes de tentar novamente...');
+          pairingTimeoutHandle = setTimeout(() => requestPairing(attempt + 1), 5000);
         } else {
           console.error('[PAIRING] Falha total após 5 tentativas.');
         }
       }
     };
-    pairingTimeoutHandle = setTimeout(() => requestPairing(1), 4000);
+    // Espera estabilização do WebSocket antes de solicitar o código
+    pairingTimeoutHandle = setTimeout(() => requestPairing(1), 6000);
   }
-
-  // Salvar credenciais
-  sock.ev.on('creds.update', saveCreds);
 
   // ─── CONEXÃO ─────────────────────────────────────────
   sock.ev.on('connection.update', async (update) => {
@@ -300,7 +303,14 @@ async function conectar() {
       const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
       console.log(`⚠️ Conexão fechada. Razão: ${reason}`);
 
-      if (reason === DisconnectReason.loggedOut || reason === 401) {
+      // Em modo de pareamento, o WhatsApp fecha a conexão enquanto o usuário digita o código (428/408).
+      // NÃO matar a sessão nem reconectar imediatamente para não invalidar o código digitado!
+      if (wantsPairing && (reason === 428 || reason === 408)) {
+        console.log('⏳ O código acima continua válido por ~2 minutos. Insira o código no WhatsApp.');
+        return;
+      }
+
+      if (reason === DisconnectReason.loggedOut || (reason === 401 && !wantsPairing)) {
         console.log('❌ Sessão encerrada (logout/401). Apagando pasta session-presenca...');
         try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
         process.exit(0);
