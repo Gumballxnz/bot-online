@@ -208,10 +208,11 @@ async function conectar() {
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
   const wantsPairing = process.argv.includes('--pair');
-  if (!state.creds.registered && !wantsPairing) {
+  const wantsQr = process.argv.includes('--qr');
+  if (!state.creds.registered && !wantsPairing && !wantsQr) {
     console.log('\n⚠️ Nenhuma sessão ativa encontrada.');
-    console.log('👉 Para conectar seu WhatsApp, execute o comando abaixo no terminal da VPS:');
-    console.log('   node index.js --pair\n');
+    console.log('👉 Para conectar seu WhatsApp via QR Code: node index.js --qr');
+    console.log('👉 Para conectar seu WhatsApp via Código:  node index.js --pair\n');
     console.log('💤 Entrando em modo de espera inativo para evitar reinicializações em loop no PM2...');
     setInterval(() => {}, 24 * 60 * 60 * 1000); // Mantém o processo vivo sem uso de CPU
     return;
@@ -272,7 +273,18 @@ async function conectar() {
 
   // ─── CONEXÃO ─────────────────────────────────────────
   sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr && !state.creds.registered && wantsQr) {
+      const QRCode = require('qrcode');
+      console.log('\n📲 [QR CODE GERADO] Escaneie o QR Code abaixo no WhatsApp:\n');
+      QRCode.toString(qr, { type: 'terminal', small: true }, (err, url) => {
+        if (!err) console.log(url);
+      });
+      // Salva arquivo HTML local igual a Nazuna
+      const htmlContent = `<html><head><meta http-equiv="refresh" content="3"><style>body{display:flex;justify-content:center;align-items:center;height:100vh;background:#f0f2f5;font-family:sans-serif;}</style></head><body><div style="background:#fff;padding:24px;border-radius:12px;text-align:center;"><h2>🤖 Escaneie com WhatsApp</h2><div id="q"></div></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script><script>new QRCode(document.getElementById("q"),{text:"${qr}",width:256,height:256});</script></body></html>`;
+      try { fs.writeFileSync(path.join(__dirname, 'qrcode.html'), htmlContent); } catch (_) {}
+    }
 
     if (connection === 'open') {
       console.log('✅ Bot conectado com sucesso!');
@@ -283,10 +295,10 @@ async function conectar() {
         pairingTimeoutHandle = null;
       }
       
-      if (wantsPairing) {
-        console.log('\n🎉 Conectado e pareado com sucesso!');
+      if (wantsPairing || wantsQr) {
+        console.log('\n🎉 Conectado com sucesso!');
         console.log('👉 A sessão foi salva. Agora você já pode fechar este processo e rodar o PM2.');
-        console.log('🚪 Fechando este pareamento em 3s...');
+        console.log('🚪 Fechando este processo em 3s...');
         setTimeout(() => process.exit(0), 3000);
         return;
       }
