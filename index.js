@@ -335,11 +335,34 @@ async function conectar() {
     }
   });
 
+  // Função auxiliar para extrair texto de qualquer tipo de mensagem Baileys
+  const extrairTexto = (m) => {
+    if (!m) return '';
+    const msg = m.ephemeralMessage?.message ||
+                m.viewOnceMessage?.message ||
+                m.viewOnceMessageV2?.message ||
+                m.documentWithCaptionMessage?.message ||
+                m;
+    return (
+      msg.conversation ||
+      msg.extendedTextMessage?.text ||
+      msg.imageMessage?.caption ||
+      msg.videoMessage?.caption ||
+      msg.documentMessage?.caption ||
+      msg.buttonsResponseMessage?.selectedButtonId ||
+      msg.templateButtonReplyMessage?.selectedId ||
+      msg.listResponseMessage?.singleSelectReply?.selectedRowId ||
+      ''
+    ).trim();
+  };
+
   // ─── MENSAGENS ───────────────────────────────────────
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+    if (type !== 'notify' && type !== 'append') return;
 
     for (const msg of messages) {
+      if (!msg.message) continue;
+
       // Anti-duplicação: ignorar mensagem já processada
       const msgId = msg.key.id;
       if (processedMsgs.has(msgId)) continue;
@@ -350,32 +373,25 @@ async function conectar() {
         arr.splice(0, arr.length - 100).forEach(id => processedMsgs.delete(id));
       }
 
-      // Ignorar mensagens antigas (mais de 5 minutos / 300s) — evita sync replay
-      const msgTs = (msg.messageTimestamp?.low || msg.messageTimestamp || 0);
-      if (msgTs && (Date.now() / 1000 - msgTs) > 300) continue;
-
       // IGNORAR grupos completamente
-      if (msg.key.remoteJid.endsWith('@g.us')) continue;
+      if (msg.key.remoteJid?.endsWith('@g.us')) continue;
 
       // IGNORAR status/stories completamente
-      if (msg.key.remoteJid === 'status@broadcast') {
-        continue;
-      }
+      if (msg.key.remoteJid === 'status@broadcast') continue;
 
       // ─── PV ─────────────────────────────────────────
-      const isFromMe = msg.key.fromMe;
+      const isFromMe = !!msg.key.fromMe;
       const remetente = msg.key.remoteJid;
-      const userPhone = remetente.split('@')[0];
+      const senderJid = msg.key.participant || remetente || '';
+      const userPhone = senderJid.replace(/[^0-9]/g, '');
       const isDono = isFromMe || DONOS.some(d => d.replace(/[^0-9]/g, '') === userPhone);
 
-      const rawTexto = (
-        msg.message?.conversation ||
-        msg.message?.extendedTextMessage?.text ||
-        ''
-      ).trim();
+      const rawTexto = extrairTexto(msg.message);
       const texto = rawTexto.toLowerCase();
 
       if (!texto) continue;
+
+      console.log(`📩 [MSG] De: ${remetente} | fromMe: ${isFromMe} | texto: "${rawTexto}"`);
 
       const prefix = subbotManager.getPrefixo();
 
@@ -416,7 +432,11 @@ async function conectar() {
           menuMsg += `╰─┈┈┈┈┈◜❁◞┈┈┈┈┈─╯`;
         }
 
-        await sock.sendMessage(remetente, { text: menuMsg }, { quoted: msg });
+        await sock.sendMessage(remetente, { text: menuMsg }, { quoted: msg }).catch(async (err) => {
+          console.error('⚠️ Falha ao responder com quoted, tentando direto:', err.message);
+          await sock.sendMessage(remetente, { text: menuMsg }).catch(e => console.error('❌ Erro fatal ao enviar menu:', e.message));
+        });
+        console.log(`✅ Menu enviado com sucesso para ${remetente}`);
         continue;
       }
 
@@ -586,14 +606,14 @@ async function conectar() {
               onConnected: async (phoneConectado) => {
                 subbotManager.limparEstado(remetente);
                 await sock.sendMessage(remetente, {
-                  text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar, envie *.desconectar*.`
+                  text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar, envie *${prefix}desconectar*.`
                 });
               },
               onError: async (errMsg) => {
                 subbotManager.limparEstado(remetente);
                 await subbotManager.deletarSubbot(subId);
                 await sock.sendMessage(remetente, {
-                  text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *.conectar* para tentar novamente.`
+                  text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *${prefix}conectar* para tentar novamente.`
                 });
               }
             });
@@ -609,7 +629,7 @@ async function conectar() {
             continue;
           } else {
             await sock.sendMessage(remetente, {
-              text: '⚠️ *Opção inválida!*\n\nPor favor, responda apenas:\n*1* - Para QR Code\n*2* - Para Código de Pareamento\n\n_(Envie *.cancelar* para desistir)_'
+              text: `⚠️ *Opção inválida!*\n\nPor favor, responda apenas:\n*1* - Para QR Code\n*2* - Para Código de Pareamento\n\n_(Envie *${prefix}cancelar* para desistir)_`
             }, { quoted: msg });
             continue;
           }
@@ -621,7 +641,7 @@ async function conectar() {
 
           if (cleanPhone.length < 8 || cleanPhone.length > 16) {
             await sock.sendMessage(remetente, {
-              text: '⚠️ *Número inválido!*\nCertifique-se de incluir o DDI e DDD (ex: `5511999999999`). Tente novamente ou envie *.cancelar*.'
+              text: `⚠️ *Número inválido!*\nCertifique-se de incluir o DDI e DDD (ex: \`5511999999999\`). Tente novamente ou envie *${prefix}cancelar*.`
             }, { quoted: msg });
             continue;
           }
@@ -649,14 +669,14 @@ async function conectar() {
             onConnected: async (phoneConectado) => {
               subbotManager.limparEstado(remetente);
               await sock.sendMessage(remetente, {
-                text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar futuramente, envie *.desconectar*.`
+                text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar futuramente, envie *${prefix}desconectar*.`
               });
             },
             onError: async (errMsg) => {
               subbotManager.limparEstado(remetente);
               await subbotManager.deletarSubbot(subId);
               await sock.sendMessage(remetente, {
-                text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *.conectar* para tentar novamente.`
+                text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *${prefix}conectar* para tentar novamente.`
               });
             }
           });
