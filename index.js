@@ -305,11 +305,7 @@ async function conectar() {
       }
       
       if (wantsPairing || wantsQr) {
-        console.log('\n🎉 Conectado com sucesso!');
-        console.log('👉 A sessão foi salva. Agora você já pode fechar este processo e rodar o PM2.');
-        console.log('🚪 Fechando este processo em 3s...');
-        setTimeout(() => process.exit(0), 3000);
-        return;
+        console.log('\n🎉 Conectado com sucesso! Sessão ativa.');
       }
 
       if (modoAtivo) iniciarPresenca();
