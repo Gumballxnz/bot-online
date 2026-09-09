@@ -25,8 +25,8 @@ console.error = function(...args) { if (shouldSuppress(args)) return; _origError
 const subbotManager = require('./subbotManager');
 
 // ─── CONFIG ──────────────────────────────────────────────
-const MEU_NUMERO = '258879116693';
-const DONOS = [MEU_NUMERO, '258879116693@s.whatsapp.net'];
+const MEU_NUMERO = '258878760967';
+const DONOS = [MEU_NUMERO, '258878760967@s.whatsapp.net', '258879116693'];
 const SESSION_DIR = path.join(__dirname, 'session-presenca');
 const ESTADO_FILE = path.join(__dirname, '.bot-estado.json');
 const AUDIO_DB_FILE = path.join(__dirname, '.bot-audio-db.json');
