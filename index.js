@@ -394,6 +394,12 @@ async function conectar() {
 
       const prefix = subbotManager.getPrefixo();
 
+      // PROTEÇÃO ANTI-LOOP: O bot nunca processa mensagens enviadas por ele mesmo,
+      // a não ser que comecem com o prefixo (comandos do dono direto no celular).
+      if (isFromMe && !texto.startsWith(prefix)) {
+        continue;
+      }
+
       // ─── COMANDO !MENU (Público para todos os membros) ─
       if (texto === `${prefix}menu` || texto.startsWith(`${prefix}menu `)) {
         await sock.readMessages([msg.key]).catch(() => {});
@@ -574,7 +580,8 @@ async function conectar() {
       }
 
       // ─── FLUXO CONVERSACIONAL DE CONEXÃO ──────────────
-      const estadoConexao = subbotManager.connectingStates.get(remetente);
+      // Apenas mensagens privadas e NUNCA mensagens do próprio bot (fromMe)
+      const estadoConexao = (!isGroup && !isFromMe) ? subbotManager.connectingStates.get(remetente) : null;
 
       if (estadoConexao) {
         await sock.readMessages([msg.key]).catch(() => {});
@@ -686,6 +693,14 @@ async function conectar() {
       // ─── COMANDO CONECTAR ────────────────────────────
       if (texto === `${prefix}conectar`) {
         await sock.readMessages([msg.key]).catch(() => {});
+
+        // Sub-bot só pode ser configurado em privado por privacidade e segurança
+        if (isGroup) {
+          await sock.sendMessage(remetente, {
+            text: `⚠️ *Atenção:* Por motivos de privacidade e segurança (envio de QR Code e Código de Pareamento), envie *${prefix}conectar* diretamente no meu chat privado.`
+          }, { quoted: msg });
+          continue;
+        }
 
         // 1. Verificar se o usuário já tem um subbot ativo
         const subExistente = subbotManager.getSubbotPorUsuario(remetente);
