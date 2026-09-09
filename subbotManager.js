@@ -131,9 +131,6 @@ class SubbotManager {
   }
 
   async deletarSubbot(id) {
-    const sub = this.config.subbots[String(id)];
-    if (!sub) return false;
-
     const sock = this.activeSockets.get(String(id));
     if (sock) {
       try { sock.ws.close(); } catch (_) {}
@@ -150,14 +147,24 @@ class SubbotManager {
       console.error(`Erro ao apagar pasta de sessão subbot_${id}:`, e.message);
     }
 
-    delete this.config.subbots[String(id)];
-    this.salvarConfig();
+    const sub = this.config.subbots[String(id)];
+    if (sub) {
+      delete this.config.subbots[String(id)];
+      this.salvarConfig();
+    }
     return true;
   }
 
   async iniciarConexao({ id, userJid, method, phone, onQRCode, onPairingCode, onConnected, onError }) {
     const sessionDir = path.join(SESSIONS_BASE_DIR, `subbot_${id}`);
     let resolvido = false;
+
+    // Se não é um subbot salvo/já conectado, garante pasta 100% limpa
+    if (!this.config.subbots[String(id)] && fs.existsSync(sessionDir)) {
+      try {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+      } catch (_) {}
+    }
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
@@ -237,7 +244,7 @@ class SubbotManager {
           const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
           console.log(`⚠️ [SubBot ${id}] Conexão fechada. Razão: ${reason}`);
 
-          if (reason === DisconnectReason.loggedOut || reason === 401) {
+          if (reason === DisconnectReason.loggedOut || (reason === 401 && resolvido)) {
             console.log(`❌ [SubBot ${id}] Desconectado pelo usuário/sessão inválida.`);
             this.deletarSubbot(id);
           } else if (reason === 515 || reason === DisconnectReason.restartRequired) {
@@ -247,6 +254,10 @@ class SubbotManager {
               this.iniciarConexao({ id, userJid, method, phone, onQRCode, onPairingCode, onConnected, onError });
             }, 2000);
           } else if (!resolvido) {
+            if (reason === 428 || reason === 408) {
+              console.log(`⏳ [SubBot ${id}] Pareamento em andamento (código ainda válido). Aguardando...`);
+              return;
+            }
             if (onError) onError(`Conexão não estabelecida (código: ${reason || 'desconhecido'}).`);
           } else {
             // Reconexão de rotina para subbot já conectado
