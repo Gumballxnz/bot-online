@@ -1,4 +1,4 @@
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
@@ -167,7 +167,10 @@ class SubbotManager {
         version,
         logger: pino({ level: 'silent' }),
         browser: Browsers.ubuntu('Chrome'),
-        auth: state,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+        },
         emitOwnEvents: false,
         markOnlineOnConnect: true,
         connectTimeoutMs: 60000,
@@ -237,8 +240,20 @@ class SubbotManager {
           if (reason === DisconnectReason.loggedOut || reason === 401) {
             console.log(`❌ [SubBot ${id}] Desconectado pelo usuário/sessão inválida.`);
             this.deletarSubbot(id);
+          } else if (reason === 515 || reason === DisconnectReason.restartRequired) {
+            // 515 = Pareamento bem-sucedido! O Baileys reinicia o socket para abrir a sessão
+            console.log(`🔄 [SubBot ${id}] Pareamento aceito! Reiniciando socket para abrir sessão (515 restartRequired)...`);
+            setTimeout(() => {
+              this.iniciarConexao({ id, userJid, method, phone, onQRCode, onPairingCode, onConnected, onError });
+            }, 2000);
           } else if (!resolvido) {
             if (onError) onError(`Conexão não estabelecida (código: ${reason || 'desconhecido'}).`);
+          } else {
+            // Reconexão de rotina para subbot já conectado
+            console.log(`🔄 [SubBot ${id}] Reconectando em 5s...`);
+            setTimeout(() => {
+              this.iniciarConexao({ id, userJid, method, phone, onQRCode, onPairingCode, onConnected, onError });
+            }, 5000);
           }
         }
       });
@@ -272,7 +287,10 @@ class SubbotManager {
           version,
           logger: pino({ level: 'silent' }),
           browser: Browsers.ubuntu('Chrome'),
-          auth: state,
+          auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+          },
           emitOwnEvents: false,
           markOnlineOnConnect: true,
           connectTimeoutMs: 60000,
@@ -293,6 +311,9 @@ class SubbotManager {
             const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
             if (reason === DisconnectReason.loggedOut || reason === 401) {
               this.deletarSubbot(id);
+            } else {
+              console.log(`🔄 [SubBot ${id}] Reconectando em 5s...`);
+              setTimeout(() => this.reconectarSubbotIndividual(id), 5000);
             }
           }
         });
@@ -301,6 +322,54 @@ class SubbotManager {
       }
     }
     this.salvarConfig();
+  }
+
+  async reconectarSubbotIndividual(id) {
+    const sub = this.config.subbots[id];
+    const sessionDir = path.join(SESSIONS_BASE_DIR, `subbot_${id}`);
+    if (!sub || !fs.existsSync(sessionDir)) return;
+
+    try {
+      const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+      const { version } = await fetchLatestBaileysVersion();
+
+      const subSock = makeWASocket({
+        version,
+        logger: pino({ level: 'silent' }),
+        browser: Browsers.ubuntu('Chrome'),
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+        },
+        emitOwnEvents: false,
+        markOnlineOnConnect: true,
+        connectTimeoutMs: 60000,
+        getMessage: async () => undefined,
+      });
+
+      this.activeSockets.set(String(id), subSock);
+      subSock.ev.on('creds.update', saveCreds);
+
+      subSock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update;
+        if (connection === 'open') {
+          console.log(`✅ [SubBot ${id}] Reconectado automaticamente!`);
+          this.config.subbots[id].status = 'conectado';
+          this.salvarConfig();
+        }
+        if (connection === 'close') {
+          const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+          if (reason === DisconnectReason.loggedOut || reason === 401) {
+            this.deletarSubbot(id);
+          } else {
+            console.log(`🔄 [SubBot ${id}] Reconectando em 5s...`);
+            setTimeout(() => this.reconectarSubbotIndividual(id), 5000);
+          }
+        }
+      });
+    } catch (err) {
+      console.error(`Erro ao reconectar SubBot individual ${id}:`, err.message);
+    }
   }
 }
 
