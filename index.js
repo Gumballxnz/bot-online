@@ -367,40 +367,35 @@ async function conectar() {
     for (const msg of messages) {
       if (!msg.message) continue;
 
+      const remetente = msg.key.remoteJid;
+      if (!remetente || remetente === 'status@broadcast') continue;
+
+      const isFromMe = !!msg.key.fromMe;
+      const isGroup = remetente.endsWith('@g.us');
+      const senderJid = msg.key.participant || remetente || '';
+      const userPhone = senderJid.replace(/[^0-9]/g, '');
+      const isDono = isFromMe || DONOS.some(d => d.replace(/[^0-9]/g, '') === userPhone);
+
       // Anti-duplicação: ignorar mensagem já processada
       const msgId = msg.key.id;
       if (processedMsgs.has(msgId)) continue;
       processedMsgs.add(msgId);
-      // Limpar cache se ficar grande demais
       if (processedMsgs.size > MAX_CACHE) {
         const arr = [...processedMsgs];
         arr.splice(0, arr.length - 100).forEach(id => processedMsgs.delete(id));
       }
 
-      // IGNORAR grupos completamente
-      if (msg.key.remoteJid?.endsWith('@g.us')) continue;
-
-      // IGNORAR status/stories completamente
-      if (msg.key.remoteJid === 'status@broadcast') continue;
-
-      // ─── PV ─────────────────────────────────────────
-      const isFromMe = !!msg.key.fromMe;
-      const remetente = msg.key.remoteJid;
-      const senderJid = msg.key.participant || remetente || '';
-      const userPhone = senderJid.replace(/[^0-9]/g, '');
-      const isDono = isFromMe || DONOS.some(d => d.replace(/[^0-9]/g, '') === userPhone);
-
-      const rawTexto = extrairTexto(msg.message);
-      const texto = rawTexto.toLowerCase();
+      const rawTexto = extrairTexto(msg.message).replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '').trim();
+      const texto = rawTexto.toLowerCase().trim();
 
       if (!texto) continue;
 
-      console.log(`📩 [MSG] De: ${remetente} | fromMe: ${isFromMe} | texto: "${rawTexto}"`);
+      console.log(`📩 [MSG] De: ${remetente} (grupo: ${isGroup}) | fromMe: ${isFromMe} | texto: "${rawTexto}"`);
 
       const prefix = subbotManager.getPrefixo();
 
       // ─── COMANDO !MENU (Público para todos os membros) ─
-      if (texto === `${prefix}menu`) {
+      if (texto === `${prefix}menu` || texto.startsWith(`${prefix}menu `)) {
         await sock.readMessages([msg.key]).catch(() => {});
         const senderPushName = msg.pushName || (isFromMe ? 'Dono' : 'Membro');
         const vagasLivres = subbotManager.getLimiteMaximo() - subbotManager.getAtivosCount();
