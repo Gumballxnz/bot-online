@@ -1,4 +1,4 @@
-const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers, makeCacheableSignalKeyStore } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
@@ -25,8 +25,11 @@ console.error = function(...args) { if (shouldSuppress(args)) return; _origError
 const subbotManager = require('./subbotManager');
 
 // ─── CONFIG ──────────────────────────────────────────────
-const MEU_NUMERO = '258878760967';
-const DONOS = [MEU_NUMERO, '258878760967@s.whatsapp.net', '258879116693'];
+const phoneArg = process.argv.find(a => a.startsWith('--phone='))?.split('=')[1] ||
+                 (process.argv[process.argv.indexOf('--pair') + 1] && !process.argv[process.argv.indexOf('--pair') + 1].startsWith('--') ? process.argv[process.argv.indexOf('--pair') + 1] : null);
+
+let MEU_NUMERO = phoneArg ? phoneArg.replace(/[^0-9]/g, '') : '258878760967';
+const DONOS = [MEU_NUMERO, `${MEU_NUMERO}@s.whatsapp.net`, '258878760967', '258879116693'];
 const SESSION_DIR = path.join(__dirname, 'session-presenca');
 const ESTADO_FILE = path.join(__dirname, '.bot-estado.json');
 const AUDIO_DB_FILE = path.join(__dirname, '.bot-audio-db.json');
@@ -224,8 +227,11 @@ async function conectar() {
   sock = makeWASocket({
     version,
     logger: pino({ level: 'silent' }),
-    browser: ['Ubuntu', 'Chrome', '20.0.04'],
-    auth: state,
+    browser: Browsers.ubuntu('Chrome'),
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })),
+    },
     emitOwnEvents: true,
     fireInitQueries: false,
     generateHighQualityLinkPreview: false,
@@ -246,16 +252,18 @@ async function conectar() {
       if (sock.authState.creds.registered) return;
       try {
         const cleanPhone = MEU_NUMERO.replace(/[^0-9]/g, '');
-        console.log(`[PAIRING] Solicitando código para ${cleanPhone} (Tentativa ${attempt}/5)...`);
+        console.log(`⏳ [PAIRING] Solicitando código para +${cleanPhone} (Tentativa ${attempt}/5)...`);
         const code = await sock.requestPairingCode(cleanPhone);
+        const codeFormatado = code?.match(/.{1,4}/g)?.join('-') || code;
         console.log('\n╔══════════════════════════════════════════╗');
         console.log('║       📲 CÓDIGO DE PAREAMENTO            ║');
         console.log('║                                          ║');
-        console.log(`║            ${code}                  ║`);
+        console.log(`║            ${codeFormatado}                  ║`);
         console.log('║                                          ║');
         console.log('║  No WhatsApp:                            ║');
         console.log('║  ⋮ > Aparelhos conectados                ║');
         console.log('║  > Conectar aparelho                     ║');
+        console.log('║  > Conectar com número de telefone       ║');
         console.log('║  > Inserir código acima                  ║');
         console.log('╚══════════════════════════════════════════╝\n');
       } catch (err) {
@@ -268,8 +276,8 @@ async function conectar() {
         }
       }
     };
-    // Espera estabilização do WebSocket antes de solicitar o código
-    pairingTimeoutHandle = setTimeout(() => requestPairing(1), 6000);
+    // Espera estabilização do WebSocket antes de solicitar o código (5s)
+    pairingTimeoutHandle = setTimeout(() => requestPairing(1), 5000);
   }
 
   // ─── CONEXÃO ─────────────────────────────────────────
