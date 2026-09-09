@@ -1,0 +1,664 @@
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, Browsers } = require('@whiskeysockets/baileys');
+const pino = require('pino');
+const { Boom } = require('@hapi/boom');
+const fs = require('fs');
+const path = require('path');
+
+// ─── SUPRIMIR LOGS SENSÍVEIS DO LIBSIGNAL ───────────────
+const _origLog = console.log;
+const _origDir = console.dir;
+const _origInfo = console.info;
+const _origError = console.error;
+function shouldSuppress(args) {
+  const str = args.map(a => typeof a === 'string' ? a : (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  return str.includes('Closing session') || str.includes('SessionEntry') || str.includes('privKey') ||
+    str.includes('registrationId:') || str.includes('rootKey') || str.includes('baseKey') ||
+    str.includes('remoteIdentityKey') || str.includes('pendingPreKey') || str.includes('signedKeyId') ||
+    str.includes('Bad MAC') || str.includes('Failed to decrypt') || str.includes('session_cipher') ||
+    str.includes('Closing open session');
+}
+console.log = function(...args) { if (shouldSuppress(args)) return; _origLog.apply(console, args); };
+console.dir = function(...args) { if (shouldSuppress(args)) return; _origDir.apply(console, args); };
+console.info = function(...args) { if (shouldSuppress(args)) return; _origInfo.apply(console, args); };
+console.error = function(...args) { if (shouldSuppress(args)) return; _origError.apply(console, args); };
+
+const subbotManager = require('./subbotManager');
+
+// ─── CONFIG ──────────────────────────────────────────────
+const MEU_NUMERO = '258879116693';
+const DONOS = [MEU_NUMERO, '258879116693@s.whatsapp.net'];
+const SESSION_DIR = path.join(__dirname, 'session-presenca');
+const ESTADO_FILE = path.join(__dirname, '.bot-estado.json');
+const AUDIO_DB_FILE = path.join(__dirname, '.bot-audio-db.json');
+const AUDIO_FILE_OPUS = path.join(__dirname, 'AUD-20260722-WA0210.opus');
+const AUDIO_FILE_MP3 = path.join(__dirname, 'AUD-20260722-WA0210.mp3');
+
+// ─── ESTADO ──────────────────────────────────────────────
+let modoAtivo = true;
+let startTime = Date.now();
+let sock = null;
+let presenceInterval = null;
+let pairingTimeoutHandle = null;
+let audioDb = {};
+
+// Anti-duplicação: guarda IDs das mensagens já processadas
+const processedMsgs = new Set();
+const MAX_CACHE = 200;
+
+function salvarEstado() {
+  try { fs.writeFileSync(ESTADO_FILE, JSON.stringify({ modoAtivo })); } catch (_) {}
+}
+function carregarEstado() {
+  try {
+    if (fs.existsSync(ESTADO_FILE)) {
+      const data = JSON.parse(fs.readFileSync(ESTADO_FILE, 'utf-8'));
+      modoAtivo = data.modoAtivo ?? true;
+    }
+  } catch (_) { modoAtivo = true; }
+}
+
+function salvarAudioDb() {
+  try { fs.writeFileSync(AUDIO_DB_FILE, JSON.stringify(audioDb, null, 2)); } catch (_) {}
+}
+function carregarAudioDb() {
+  try {
+    if (fs.existsSync(AUDIO_DB_FILE)) {
+      audioDb = JSON.parse(fs.readFileSync(AUDIO_DB_FILE, 'utf-8'));
+    }
+  } catch (_) { audioDb = {}; }
+}
+function getHojeDataStr() {
+  const d = new Date();
+  const ano = d.getFullYear();
+  const mes = String(d.getMonth() + 1).padStart(2, '0');
+  const dia = String(d.getDate()).padStart(2, '0');
+  return `${ano}-${mes}-${dia}`;
+}
+
+// Cache do buffer/duração do áudio para não reler do disco a cada envio
+let audioBufferCache = null;
+let audioSecondsCache = 6;
+
+// Garante um OGG/Opus válido. WhatsApp PTT (nota de voz) SÓ aceita opus.
+// Retorna true se o .opus existe (ou foi gerado com sucesso).
+function garantirOpus() {
+  if (fs.existsSync(AUDIO_FILE_OPUS)) return true;
+  if (!fs.existsSync(AUDIO_FILE_MP3)) return false;
+
+  // Tenta converter do MP3 com as flags corretas p/ WhatsApp: mono, 48kHz, opus.
+  try {
+    const { execSync } = require('child_process');
+    execSync(
+      `ffmpeg -y -i "${AUDIO_FILE_MP3}" -ac 1 -ar 48000 -c:a libopus -b:a 32k -application voip "${AUDIO_FILE_OPUS}"`,
+      { stdio: 'ignore' }
+    );
+    return fs.existsSync(AUDIO_FILE_OPUS);
+  } catch (e) {
+    console.error('⚠️ ffmpeg indisponível/falhou ao gerar .opus:', e.message);
+    return false;
+  }
+}
+
+// Calcula a duração (em segundos) de um Ogg/Opus lendo o granule position.
+function calcularDuracaoOpus(buffer) {
+  try {
+    let offset = 0, lastGranule = 0n, preSkip = 0;
+    while (offset + 27 <= buffer.length) {
+      if (buffer.toString('ascii', offset, offset + 4) !== 'OggS') break;
+      const granule = buffer.readBigUInt64LE(offset + 6);
+      if (granule !== 0xffffffffffffffffn && granule > lastGranule) lastGranule = granule;
+      const segCount = buffer.readUInt8(offset + 26);
+      let bodyLen = 0;
+      for (let i = 0; i < segCount; i++) bodyLen += buffer.readUInt8(offset + 27 + i);
+      const bodyStart = offset + 27 + segCount;
+      if (buffer.toString('ascii', bodyStart, bodyStart + 8) === 'OpusHead') {
+        preSkip = buffer.readUInt16LE(bodyStart + 10);
+      }
+      offset = bodyStart + bodyLen;
+    }
+    const secs = Math.round(Number(lastGranule - BigInt(preSkip)) / 48000); // opus = 48kHz
+    return secs > 0 ? secs : 6;
+  } catch (_) {
+    return 6;
+  }
+}
+
+async function processarEnvioAudio(remetente) {
+  try {
+    // WhatsApp PTT só aceita OGG/Opus. Nunca enviar MP3 como nota de voz
+    // (isso gera o erro "há algo errado com o arquivo de áudio").
+    if (!garantirOpus()) {
+      console.error(
+        '❌ Nenhum .opus válido disponível e o ffmpeg não pôde gerar um.\n' +
+        '   → Copie o AUD-20260722-WA0210.opus para a VPS OU instale o ffmpeg.\n' +
+        '   NÃO vou enviar o MP3 como nota de voz para evitar áudio corrompido.'
+      );
+      return;
+    }
+
+    // Carrega e cacheia o buffer + duração (uma vez só)
+    if (!audioBufferCache) {
+      audioBufferCache = fs.readFileSync(AUDIO_FILE_OPUS);
+      audioSecondsCache = calcularDuracaoOpus(audioBufferCache);
+    }
+
+    if (sock && modoAtivo) {
+      await sock.sendPresenceUpdate('recording', remetente).catch(() => {});
+    }
+
+    // Aguarda exatamente 6 segundos gravando
+    await new Promise(resolve => setTimeout(resolve, 6000));
+
+    if (sock) {
+      await sock.sendPresenceUpdate('paused', remetente).catch(() => {});
+    }
+
+    if (sock && modoAtivo) {
+      await sock.sendMessage(remetente, {
+        audio: audioBufferCache,
+        mimetype: 'audio/ogg; codecs=opus',
+        ptt: true,
+        seconds: audioSecondsCache,
+      });
+      console.log(`🎙️ Áudio diário (opus, ${audioSecondsCache}s) enviado com sucesso para: ${remetente}`);
+    }
+  } catch (err) {
+    console.error(`❌ Erro ao enviar áudio diário para ${remetente}:`, err.message);
+  }
+}
+
+// ─── PRESENÇA ONLINE ─────────────────────────────────────
+function iniciarPresenca() {
+  pararPresenca();
+  if (!modoAtivo || !sock) return;
+  sock.sendPresenceUpdate('available').catch(() => {});
+  presenceInterval = setInterval(() => {
+    if (sock && modoAtivo) {
+      sock.sendPresenceUpdate('available').catch(() => {});
+    }
+  }, 25_000);
+}
+
+function pararPresenca() {
+  if (presenceInterval) {
+    clearInterval(presenceInterval);
+    presenceInterval = null;
+  }
+  if (sock) sock.sendPresenceUpdate('unavailable').catch(() => {});
+}
+
+// ─── CONEXÃO ─────────────────────────────────────────────
+async function conectar() {
+  carregarEstado();
+  carregarAudioDb();
+
+  // Limpa timeout de pairing anterior
+  if (pairingTimeoutHandle) {
+    clearTimeout(pairingTimeoutHandle);
+    pairingTimeoutHandle = null;
+  }
+
+  // Fecha socket anterior se existir
+  if (sock) {
+    try { sock.ws.close(); } catch (_) {}
+    try { sock.ev.removeAllListeners(); } catch (_) {}
+    sock = null;
+  }
+
+  const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
+
+  const wantsPairing = process.argv.includes('--pair');
+  if (!state.creds.registered && !wantsPairing) {
+    console.log('\n⚠️ Nenhuma sessão ativa encontrada.');
+    console.log('👉 Para conectar seu WhatsApp, execute o comando abaixo no terminal da VPS:');
+    console.log('   node index.js --pair\n');
+    console.log('💤 Entrando em modo de espera inativo para evitar reinicializações em loop no PM2...');
+    setInterval(() => {}, 24 * 60 * 60 * 1000); // Mantém o processo vivo sem uso de CPU
+    return;
+  }
+
+  const { version } = await fetchLatestBaileysVersion();
+
+  sock = makeWASocket({
+    version,
+    logger: pino({ level: 'silent' }),
+    browser: Browsers.ubuntu('Chrome'),
+    auth: state,
+    emitOwnEvents: true,
+    markOnlineOnConnect: true,
+    keepAliveIntervalMs: 20000,
+    connectTimeoutMs: 30000,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+    getMessage: async () => undefined,
+  });
+
+  // ─── PAIRING CODE (apenas se --pair for passado) ───
+  if (!state.creds.registered && wantsPairing) {
+    const requestPairing = async (attempt = 1) => {
+      if (sock.authState.creds.registered) return;
+      try {
+        const cleanPhone = MEU_NUMERO.replace(/[^0-9]/g, '');
+        console.log(`[PAIRING] Solicitando código para ${cleanPhone} (Tentativa ${attempt}/5)...`);
+        const code = await sock.requestPairingCode(cleanPhone);
+        console.log('\n╔══════════════════════════════════════════╗');
+        console.log('║       📲 CÓDIGO DE PAREAMENTO            ║');
+        console.log('║                                          ║');
+        console.log(`║            ${code}                  ║`);
+        console.log('║                                          ║');
+        console.log('║  No WhatsApp:                            ║');
+        console.log('║  ⋮ > Aparelhos conectados                ║');
+        console.log('║  > Conectar aparelho                     ║');
+        console.log('║  > Inserir código acima                  ║');
+        console.log('╚══════════════════════════════════════════╝\n');
+      } catch (err) {
+        console.error(`[PAIRING] Erro (Tentativa ${attempt}/5):`, err.message);
+        if (attempt < 5) {
+          console.log('[PAIRING] Aguardando 3s antes de tentar novamente...');
+          pairingTimeoutHandle = setTimeout(() => requestPairing(attempt + 1), 3000);
+        } else {
+          console.error('[PAIRING] Falha total após 5 tentativas.');
+        }
+      }
+    };
+    pairingTimeoutHandle = setTimeout(() => requestPairing(1), 4000);
+  }
+
+  // Salvar credenciais
+  sock.ev.on('creds.update', saveCreds);
+
+  // ─── CONEXÃO ─────────────────────────────────────────
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update;
+
+    if (connection === 'open') {
+      console.log('✅ Bot conectado com sucesso!');
+      startTime = Date.now();
+      // Limpa timeout de pairing se ainda existir
+      if (pairingTimeoutHandle) {
+        clearTimeout(pairingTimeoutHandle);
+        pairingTimeoutHandle = null;
+      }
+      
+      if (wantsPairing) {
+        console.log('\n🎉 Conectado e pareado com sucesso!');
+        console.log('👉 A sessão foi salva. Agora você já pode fechar este processo e rodar o PM2.');
+        console.log('🚪 Fechando este pareamento em 3s...');
+        setTimeout(() => process.exit(0), 3000);
+        return;
+      }
+
+      if (modoAtivo) iniciarPresenca();
+
+      // Reconectar instâncias de sub-bots salvas
+      subbotManager.reconectarSubbotsSalvos().catch(err => {
+        console.error('Erro ao reconectar subbots salvos:', err.message);
+      });
+    }
+
+    if (connection === 'close') {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      console.log(`⚠️ Conexão fechada. Razão: ${reason}`);
+
+      if (reason === DisconnectReason.loggedOut || reason === 401) {
+        console.log('❌ Sessão encerrada (logout/401). Apagando pasta session-presenca...');
+        try { fs.rmSync(SESSION_DIR, { recursive: true, force: true }); } catch (_) {}
+        process.exit(0);
+      }
+
+      // Reconexão automática
+      console.log('🔄 Reconectando em 5s...');
+      setTimeout(conectar, 5000);
+    }
+  });
+
+  // ─── MENSAGENS ───────────────────────────────────────
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      // Anti-duplicação: ignorar mensagem já processada
+      const msgId = msg.key.id;
+      if (processedMsgs.has(msgId)) continue;
+      processedMsgs.add(msgId);
+      // Limpar cache se ficar grande demais
+      if (processedMsgs.size > MAX_CACHE) {
+        const arr = [...processedMsgs];
+        arr.splice(0, arr.length - 100).forEach(id => processedMsgs.delete(id));
+      }
+
+      // Ignorar mensagens antigas (mais de 5 minutos / 300s) — evita sync replay
+      const msgTs = (msg.messageTimestamp?.low || msg.messageTimestamp || 0);
+      if (msgTs && (Date.now() / 1000 - msgTs) > 300) continue;
+
+      // IGNORAR grupos completamente
+      if (msg.key.remoteJid.endsWith('@g.us')) continue;
+
+      // IGNORAR status/stories completamente
+      if (msg.key.remoteJid === 'status@broadcast') {
+        continue;
+      }
+
+      // ─── PV ─────────────────────────────────────────
+      const isFromMe = msg.key.fromMe;
+      const remetente = msg.key.remoteJid;
+      const userPhone = remetente.split('@')[0];
+      const isDono = isFromMe || DONOS.some(d => d.replace(/[^0-9]/g, '') === userPhone);
+
+      const rawTexto = (
+        msg.message?.conversation ||
+        msg.message?.extendedTextMessage?.text ||
+        ''
+      ).trim();
+      const texto = rawTexto.toLowerCase();
+
+      if (!texto) continue;
+
+      // ─── COMANDOS DE DONO ─────────────────────────────
+      if (isDono) {
+        if (texto === '.on') {
+          await sock.readMessages([msg.key]).catch(() => {});
+          modoAtivo = true;
+          salvarEstado();
+          iniciarPresenca();
+          await sock.sendMessage(remetente, { text: '✅ *Modo 24/7 ATIVADO*\n\n• Presença online' }, { quoted: msg });
+          continue;
+        }
+
+        if (texto === '.off') {
+          await sock.readMessages([msg.key]).catch(() => {});
+          modoAtivo = false;
+          salvarEstado();
+          pararPresenca();
+          await sock.sendMessage(remetente, { text: '⛔ *Modo 24/7 DESATIVADO*\n\n• Presença offline' }, { quoted: msg });
+          continue;
+        }
+
+        if (texto === '.bot') {
+          await sock.readMessages([msg.key]).catch(() => {});
+          const uptime = formatUptime(Date.now() - startTime);
+          const mem = process.memoryUsage();
+          const rss = (mem.rss / 1024 / 1024).toFixed(1);
+          const heap = (mem.heapUsed / 1024 / 1024).toFixed(1);
+
+          const status = [
+            '🤖 *Bot Presença - Status*',
+            '',
+            `⏱️ *Uptime:* ${uptime}`,
+            `📡 *Modo:* ${modoAtivo ? '🟢 ON (24/7)' : '🔴 OFF (Normal)'}`,
+            `🔗 *Conexão:* ✅ Conectado`,
+            `💾 *RAM:* ${rss} MB (heap: ${heap} MB)`,
+            `👥 *Sub-Bots:* ${subbotManager.getAtivosCount()}/${subbotManager.getLimiteMaximo()} ativos`,
+            `🖥️ *Plataforma:* ${process.platform} ${process.arch}`,
+            `📦 *Node:* ${process.version}`,
+          ].join('\n');
+
+          await sock.sendMessage(remetente, { text: status }, { quoted: msg });
+          continue;
+        }
+
+        // Listar sub-bots conectados
+        if (texto === '.subbots' || texto === '.listarsub') {
+          await sock.readMessages([msg.key]).catch(() => {});
+          const lista = subbotManager.listarSubbots();
+          await sock.sendMessage(remetente, { text: lista }, { quoted: msg });
+          continue;
+        }
+
+        // Alterar limite de sub-bots (.setlimite 5)
+        if (texto.startsWith('.setlimite')) {
+          await sock.readMessages([msg.key]).catch(() => {});
+          const partes = rawTexto.split(/\s+/);
+          const novoLimite = parseInt(partes[1], 10);
+          if (isNaN(novoLimite) || novoLimite < 0) {
+            await sock.sendMessage(remetente, { text: '⚠️ *Uso correto:* `.setlimite <número>`\nExemplo: `.setlimite 3`' }, { quoted: msg });
+            continue;
+          }
+
+          subbotManager.setLimiteMaximo(novoLimite);
+          await sock.sendMessage(remetente, {
+            text: `✅ *Limite atualizado com sucesso!*\n\n• Novo limite de conexões: *${novoLimite}* sub-bots`
+          }, { quoted: msg });
+          continue;
+        }
+
+        // Deletar / Desconectar subbot por ID (.delsubbot 1)
+        if (texto.startsWith('.delsubbot')) {
+          await sock.readMessages([msg.key]).catch(() => {});
+          const partes = rawTexto.split(/\s+/);
+          const idSub = partes[1];
+          if (!idSub) {
+            await sock.sendMessage(remetente, { text: '⚠️ *Uso correto:* `.delsubbot <id>`\nConsulte os IDs com `.subbots`.' }, { quoted: msg });
+            continue;
+          }
+
+          const removido = await subbotManager.deletarSubbot(idSub);
+          if (removido) {
+            await sock.sendMessage(remetente, { text: `✅ *Sub-bot [${idSub}] desconectado e removido com sucesso!*` }, { quoted: msg });
+          } else {
+            await sock.sendMessage(remetente, { text: `❌ Sub-bot com ID \`${idSub}\` não foi encontrado.` }, { quoted: msg });
+          }
+          continue;
+        }
+      }
+
+      // ─── CANCELAR CONEXÃO EM ANDAMENTO ───────────────
+      if (texto === '.cancelar') {
+        if (subbotManager.connectingStates.has(remetente)) {
+          const estado = subbotManager.connectingStates.get(remetente);
+          if (estado.id) await subbotManager.deletarSubbot(estado.id);
+          subbotManager.limparEstado(remetente);
+          await sock.readMessages([msg.key]).catch(() => {});
+          await sock.sendMessage(remetente, { text: '❌ *Processo de conexão cancelado.*' }, { quoted: msg });
+          continue;
+        }
+      }
+
+      // ─── DESCONECTAR PRÓPRIO SUB-BOT ──────────────────
+      if (texto === '.desconectar' || texto === '.desconectarsub') {
+        await sock.readMessages([msg.key]).catch(() => {});
+        const meuSub = subbotManager.getSubbotPorUsuario(remetente);
+        if (!meuSub) {
+          await sock.sendMessage(remetente, { text: 'ℹ️ Você não possui nenhum sub-bot conectado no momento.' }, { quoted: msg });
+          continue;
+        }
+
+        await subbotManager.deletarSubbot(meuSub.id);
+        await sock.sendMessage(remetente, { text: `✅ *Seu sub-bot (ID ${meuSub.id}) foi desconectado e removido com sucesso.*` }, { quoted: msg });
+        continue;
+      }
+
+      // ─── FLUXO CONVERSACIONAL DE CONEXÃO ──────────────
+      const estadoConexao = subbotManager.connectingStates.get(remetente);
+
+      if (estadoConexao) {
+        await sock.readMessages([msg.key]).catch(() => {});
+
+        // ETAPA 1: Escolha do método (1 = QR Code, 2 = Pairing Code)
+        if (estadoConexao.step === 'ESCOLHER_METODO') {
+          if (texto === '1') {
+            // QR CODE
+            estadoConexao.step = 'PROCESSANDO_QR';
+            estadoConexao.method = '1';
+            const subId = subbotManager.gerarProximoId();
+            estadoConexao.id = subId;
+
+            await sock.sendMessage(remetente, {
+              text: '⏳ *Gerando QR Code...*\nPor favor, aguarde alguns instantes.'
+            }, { quoted: msg });
+
+            subbotManager.iniciarConexao({
+              id: subId,
+              userJid: remetente,
+              method: '1',
+              onQRCode: async (buffer) => {
+                await sock.sendMessage(remetente, {
+                  image: buffer,
+                  caption: '📲 *Aponte seu WhatsApp para conectar!*\n\n• Abra o WhatsApp > Aparelhos Conectados > Conectar um aparelho.\n⏱️ Você tem 1 minuto para escanear.'
+                });
+              },
+              onConnected: async (phoneConectado) => {
+                subbotManager.limparEstado(remetente);
+                await sock.sendMessage(remetente, {
+                  text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar, envie *.desconectar*.`
+                });
+              },
+              onError: async (errMsg) => {
+                subbotManager.limparEstado(remetente);
+                await subbotManager.deletarSubbot(subId);
+                await sock.sendMessage(remetente, {
+                  text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *.conectar* para tentar novamente.`
+                });
+              }
+            });
+            continue;
+          } else if (texto === '2') {
+            // PAIRING CODE
+            estadoConexao.step = 'AGUARDANDO_NUMERO';
+            estadoConexao.method = '2';
+
+            await sock.sendMessage(remetente, {
+              text: '📱 *Envie seu número de telefone com DDI e DDD:*\n\nExemplo: `5511999999999` ou `258879116693`\n*(Digite apenas números ou com +)*'
+            }, { quoted: msg });
+            continue;
+          } else {
+            await sock.sendMessage(remetente, {
+              text: '⚠️ *Opção inválida!*\n\nPor favor, responda apenas:\n*1* - Para QR Code\n*2* - Para Código de Pareamento\n\n_(Envie *.cancelar* para desistir)_'
+            }, { quoted: msg });
+            continue;
+          }
+        }
+
+        // ETAPA 2: Recebendo o número para Pairing Code
+        if (estadoConexao.step === 'AGUARDANDO_NUMERO') {
+          const cleanPhone = rawTexto.replace(/[^0-9]/g, '');
+
+          if (cleanPhone.length < 8 || cleanPhone.length > 16) {
+            await sock.sendMessage(remetente, {
+              text: '⚠️ *Número inválido!*\nCertifique-se de incluir o DDI e DDD (ex: `5511999999999`). Tente novamente ou envie *.cancelar*.'
+            }, { quoted: msg });
+            continue;
+          }
+
+          estadoConexao.step = 'PROCESSANDO_CODE';
+          estadoConexao.phone = cleanPhone;
+          const subId = subbotManager.gerarProximoId();
+          estadoConexao.id = subId;
+
+          await sock.sendMessage(remetente, {
+            text: `⏳ *Solicitando código de pareamento para o número +${cleanPhone}...*\nAguarde alguns segundos.`
+          }, { quoted: msg });
+
+          subbotManager.iniciarConexao({
+            id: subId,
+            userJid: remetente,
+            method: '2',
+            phone: cleanPhone,
+            onPairingCode: async (code) => {
+              const codeFormatado = code?.match(/.{1,4}/g)?.join('-') || code;
+              await sock.sendMessage(remetente, {
+                text: `📲 *SEU CÓDIGO DE PAREAMENTO:*\n\n#️⃣ \`${codeFormatado}\`\n\n*Como conectar:* \n1. Abra o WhatsApp no celular.\n2. Toque em ⋮ > *Aparelhos conectados*.\n3. Toque em *Conectar um aparelho* > *Conectar com número de telefone*.\n4. Insira o código acima.\n\n⏱️ Aguardando confirmação...`
+              });
+            },
+            onConnected: async (phoneConectado) => {
+              subbotManager.limparEstado(remetente);
+              await sock.sendMessage(remetente, {
+                text: `🎉 *Conexão estabelecida com sucesso!*\n\n• Sub-Bot ID: \`${subId}\`\n• Número: \`${phoneConectado}\`\n• Status: 🟢 Ativo 24/7\n\nCaso queira desconectar futuramente, envie *.desconectar*.`
+              });
+            },
+            onError: async (errMsg) => {
+              subbotManager.limparEstado(remetente);
+              await subbotManager.deletarSubbot(subId);
+              await sock.sendMessage(remetente, {
+                text: `❌ *Falha na conexão do Sub-Bot:*\n${errMsg}\n\nEnvie *.conectar* para tentar novamente.`
+              });
+            }
+          });
+          continue;
+        }
+      }
+
+      // ─── COMANDO .CONECTAR ────────────────────────────
+      if (texto === '.conectar') {
+        await sock.readMessages([msg.key]).catch(() => {});
+
+        // 1. Verificar se o usuário já tem um subbot ativo
+        const subExistente = subbotManager.getSubbotPorUsuario(remetente);
+        if (subExistente) {
+          await sock.sendMessage(remetente, {
+            text: `⚠️ *Você já possui um sub-bot ativo!*\n\n• ID: \`${subExistente.id}\`\n• Número: \`${subExistente.phone}\`\n\nPara desconectar seu bot anterior e criar um novo, envie *.desconectar*.`
+          }, { quoted: msg });
+          continue;
+        }
+
+        // 2. Verificar se há vagas disponíveis
+        if (!subbotManager.temVaga()) {
+          const ativos = subbotManager.getAtivosCount();
+          const limite = subbotManager.getLimiteMaximo();
+          await sock.sendMessage(remetente, {
+            text: `🚫 *Limite de conexões atingido!*\n\nNo momento, todas as vagas estão ocupadas (${ativos}/${limite} ativas).\nTente novamente mais tarde.`
+          }, { quoted: msg });
+          continue;
+        }
+
+        // 3. Iniciar fluxo de escolha de método
+        const timeoutHandle = setTimeout(async () => {
+          if (subbotManager.connectingStates.has(remetente)) {
+            const estado = subbotManager.connectingStates.get(remetente);
+            if (estado.id) await subbotManager.deletarSubbot(estado.id);
+            subbotManager.limparEstado(remetente);
+            await sock.sendMessage(remetente, {
+              text: '⏱️ *Tempo esgotado:* Processo de conexão cancelado por inatividade.'
+            }).catch(() => {});
+          }
+        }, 120000); // 2 minutos de timeout
+
+        subbotManager.connectingStates.set(remetente, {
+          step: 'ESCOLHER_METODO',
+          timeoutHandle
+        });
+
+        const ativos = subbotManager.getAtivosCount();
+        const limite = subbotManager.getLimiteMaximo();
+
+        const menuEscolha = [
+          '🤖 *SISTEMA DE SUB-BOTS*',
+          '',
+          `📊 *Vagas disponíveis:* ${limite - ativos} de ${limite}`,
+          '',
+          'Escolha como deseja conectar:',
+          '*[1]* QR Code',
+          '*[2]* Código de Pareamento',
+          '',
+          '👉 *Responda apenas com 1 ou 2.*',
+          '_(Envie *.cancelar* a qualquer momento para desistir)_'
+        ].join('\n');
+
+        await sock.sendMessage(remetente, { text: menuEscolha }, { quoted: msg });
+        continue;
+      }
+    }
+  });
+}
+
+// ─── UTILS ───────────────────────────────────────────────
+function formatUptime(ms) {
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const parts = [];
+  if (d > 0) parts.push(`${d}d`);
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  parts.push(`${sec}s`);
+  return parts.join(' ');
+}
+
+// ─── INICIAR ─────────────────────────────────────────────
+console.log('🚀 Iniciando Bot Presença...');
+conectar().catch(err => {
+  console.error('Erro fatal:', err);
+  process.exit(1);
+});

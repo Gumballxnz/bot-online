@@ -1,0 +1,9 @@
+node_modules/
+session-presenca/
+sessions/
+*.key
+*.pem
+.bot-estado.json
+.bot-audio-db.json
+
+VPS_CONFIG.md
