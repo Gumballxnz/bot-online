@@ -207,9 +207,10 @@ async function conectar() {
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSION_DIR);
 
+  const isConnected = state?.creds?.me || state?.creds?.registered;
   const wantsPairing = process.argv.includes('--pair');
   const wantsQr = process.argv.includes('--qr');
-  if (!state.creds.registered && !wantsPairing && !wantsQr) {
+  if (!isConnected && !wantsPairing && !wantsQr) {
     console.log('\n⚠️ Nenhuma sessão ativa encontrada.');
     console.log('👉 Para conectar seu WhatsApp via QR Code: node index.js --qr');
     console.log('👉 Para conectar seu WhatsApp via Código:  node index.js --pair\n');
