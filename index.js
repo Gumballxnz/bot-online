@@ -28,8 +28,17 @@ const subbotManager = require('./subbotManager');
 const phoneArg = process.argv.find(a => a.startsWith('--phone='))?.split('=')[1] ||
                  (process.argv[process.argv.indexOf('--pair') + 1] && !process.argv[process.argv.indexOf('--pair') + 1].startsWith('--') ? process.argv[process.argv.indexOf('--pair') + 1] : null);
 
-let MEU_NUMERO = phoneArg ? phoneArg.replace(/[^0-9]/g, '') : '258878760967';
-const DONOS = [MEU_NUMERO, `${MEU_NUMERO}@s.whatsapp.net`, '258878760967', '258879116693'];
+let MEU_NUMERO = phoneArg ? phoneArg.replace(/[^0-9]/g, '') : '258855954127';
+const DONOS = [
+  MEU_NUMERO,
+  `${MEU_NUMERO}@s.whatsapp.net`,
+  '258878760967',
+  '258879116693',
+  '258855954127',
+  '159034049044504',
+  '208594297454800',
+  '206223056085160'
+];
 const SESSION_DIR = path.join(__dirname, 'session-presenca');
 const ESTADO_FILE = path.join(__dirname, '.bot-estado.json');
 const AUDIO_DB_FILE = path.join(__dirname, '.bot-audio-db.json');
@@ -374,7 +383,11 @@ async function conectar() {
       const isGroup = remetente.endsWith('@g.us');
       const senderJid = msg.key.participant || remetente || '';
       const userPhone = senderJid.replace(/[^0-9]/g, '');
-      const isDono = isFromMe || DONOS.some(d => d.replace(/[^0-9]/g, '') === userPhone);
+      const isDono = isFromMe ||
+        DONOS.some(d => d.replace(/[^0-9]/g, '') === userPhone) ||
+        DONOS.some(d => senderJid.includes(d.replace(/[^0-9]/g, ''))) ||
+        (sock?.user?.id && senderJid.includes(sock.user.id.split(':')[0])) ||
+        (sock?.user?.lid && senderJid.includes(sock.user.lid.split(':')[0]));
 
       // Anti-duplicação: ignorar mensagem já processada
       const msgId = msg.key.id;
@@ -415,6 +428,7 @@ async function conectar() {
         menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}conectar\n`;
         menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}desconectar\n`;
         menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}cancelar\n`;
+        menuMsg += `┊•.̇𖥨֗⚡⭟${prefix}subbots\n`;
         menuMsg += `┊\n`;
         menuMsg += `┊📊 Vagas disponíveis: ${vagasLivres}/${subbotManager.getLimiteMaximo()}\n`;
         menuMsg += `╰─┈┈┈┈┈◜❁◞┈┈┈┈┈─╯\n\n`;
@@ -442,6 +456,15 @@ async function conectar() {
           await sock.sendMessage(remetente, { text: menuMsg }).catch(e => console.error('❌ Erro fatal ao enviar menu:', e.message));
         });
         console.log(`✅ Menu enviado com sucesso para ${remetente}`);
+        continue;
+      }
+
+      // ─── COMANDO !SUBBOTS (Público para todos verem) ──
+      if (texto === `${prefix}subbots` || texto === `${prefix}listarsub`) {
+        await sock.readMessages([msg.key]).catch(() => {});
+        const lista = subbotManager.listarSubbots();
+        await sock.sendMessage(remetente, { text: lista }, { quoted: msg });
+        console.log(`✅ Lista de subbots enviada para ${remetente}`);
         continue;
       }
 
@@ -508,13 +531,6 @@ async function conectar() {
           continue;
         }
 
-        // Listar sub-bots conectados
-        if (texto === `${prefix}subbots` || texto === `${prefix}listarsub`) {
-          await sock.readMessages([msg.key]).catch(() => {});
-          const lista = subbotManager.listarSubbots();
-          await sock.sendMessage(remetente, { text: lista }, { quoted: msg });
-          continue;
-        }
 
         // Alterar limite de sub-bots (!setlimite 5)
         if (texto.startsWith(`${prefix}setlimite`)) {
