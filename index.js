@@ -363,7 +363,7 @@ async function conectar() {
         const vagasLivres = subbotManager.getLimiteMaximo() - subbotManager.getAtivosCount();
 
         let menuMsg = `╭┈⊰ ⚡ 『 *BOT ONLINE* 』\n`;
-        menuMsg += `┊Olá, ${senderPushName} ╰⁔╯!\n`;
+        menuMsg += `┊Olá, ${senderPushName}!\n`;
         menuMsg += `╰─┈┈┈┈┈◜❁◞┈┈┈┈┈─╯\n\n`;
 
         menuMsg += `╭┈❁ *⚡ SUB-BOTS & CONEXÃO*\n`;
